@@ -1,0 +1,119 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  quality:
+    name: Test and build Windows x64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run tests
+        run: cargo test --all-targets --locked
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Package release assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target\release\minesweeper.exe dist\minesweeper.exe -Force
+          Compress-Archive -Path dist\minesweeper.exe, README.md, LICENSE -DestinationPath dist\minesweeper-windows-x64.zip -Force
+          $hash = (Get-FileHash dist\minesweeper.exe -Algorithm SHA256).Hash
+          "$hash  minesweeper.exe" | Set-Content -Path dist\SHA256SUMS.txt -Encoding ascii
+          Write-Host "SHA-256: $hash"
+
+      - name: Smoke start
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath .\dist\minesweeper.exe -PassThru
+          try {
+            Start-Sleep -Seconds 3
+            $process.Refresh()
+            if ($process.HasExited) {
+              throw "minesweeper.exe exited during the 3-second smoke interval (exit code $($process.ExitCode))."
+            }
+            Write-Host "minesweeper.exe remained alive for the smoke interval."
+          }
+          finally {
+            if (-not $process.HasExited) {
+              if (-not $process.CloseMainWindow()) {
+                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+              }
+              if (-not $process.WaitForExit(3000)) {
+                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+              }
+            }
+          }
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: minesweeper-windows-x64
+          path: |
+            dist/minesweeper.exe
+            dist/minesweeper-windows-x64.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    needs: quality
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: minesweeper-windows-x64
+          path: release-assets
+
+      - name: Create or update release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" release-assets/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Rust Sweeper $tag" \
+              --generate-notes \
+              --verify-tag
+          fi

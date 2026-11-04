@@ -1,0 +1,21 @@
+# Rust build output
+/target/
+**/*.rs.bk
+
+# Local release output (distributed through GitHub Releases)
+/dist/
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local scratch files
+/*.log
+/encoding-test.txt
+/qa-*.png
+/classic-final.png
